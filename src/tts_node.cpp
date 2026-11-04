@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <format>
+#include <future>
 #include <memory>
 #include <stdexcept>
 #include <utility>
@@ -19,6 +20,17 @@ namespace tts {
     namespace {
 
         constexpr std::size_t kMaxRememberedClips = 128;
+
+        /// goal 状态可能被并发取消/关闭改变；非法 transition 不应终止节点。
+        template <typename Callable>
+        void safe_goal_transition(const rclcpp::Logger& logger, Callable&& callable) {
+            try {
+                callable();
+            }
+            catch (const rclcpp::exceptions::RCLError& error) {
+                RCLCPP_WARN(logger, "goal transition failed: %s", error.what());
+            }
+        }
         constexpr std::int64_t kDefaultCacheBytes = 256LL * 1024LL * 1024LL;
 
         float normalize_rate(const float rate) {
@@ -31,7 +43,8 @@ namespace tts {
 
     } // namespace
 
-    TtsNode::TtsNode(rclcpp::Node::SharedPtr node) : node_(std::move(node)) {
+    TtsNode::TtsNode(rclcpp::Node::SharedPtr node) :
+        node_(std::move(node)) {
         if (!node_) {
             throw std::invalid_argument("TtsNode requires a non-null rclcpp::Node");
         }
@@ -39,6 +52,8 @@ namespace tts {
         load_parameters();
         cache_ = std::make_unique<TtsCache>(cache_dir_, static_cast<std::uint64_t>(cache_max_bytes_));
         backend_ = create_backend();
+        scheduler_ = std::make_unique<SynthesisScheduler>(
+            static_cast<std::size_t>(std::max(1, scheduler_max_pending_)));
         create_interfaces();
 
         say_worker_ = std::jthread([this](const std::stop_token stop_token) {
@@ -49,7 +64,8 @@ namespace tts {
             RCLCPP_INFO(node_->get_logger(),
                         "TTS node ready: backend=%s, audio_io=%s, cache=%s",
                         backend_name_.c_str(), audio_io_node_.c_str(), cache_dir_.c_str());
-        } else {
+        }
+        else {
             RCLCPP_ERROR(node_->get_logger(),
                          "TTS node started with an unavailable %s backend: %s",
                          backend_name_.c_str(), backend_error_.c_str());
@@ -63,6 +79,9 @@ namespace tts {
             for (auto& [uuid, flag] : cancel_flags_) {
                 flag->store(true);
             }
+        }
+        if (scheduler_) {
+            scheduler_->shutdown();
         }
         {
             const std::lock_guard lock(say_mutex_);
@@ -105,9 +124,13 @@ namespace tts {
         }
 
         max_sentence_chars_ = std::max<int>(16, node_->declare_parameter<int>("max_sentence_chars", 120));
+        scheduler_max_pending_ = std::max<int>(
+            1, node_->declare_parameter<int>("scheduler.max_pending", 16));
+        scheduler_preempt_speech_ =
+            node_->declare_parameter<bool>("scheduler.preempt_speech", true);
         const auto raw_cache_dir = declare_string("cache.dir", "~/.cache/robot_audio/tts");
         cache_max_bytes_ = std::max<std::int64_t>(
-                0, node_->declare_parameter<std::int64_t>("cache.max_bytes", kDefaultCacheBytes));
+            0, node_->declare_parameter<std::int64_t>("cache.max_bytes", kDefaultCacheBytes));
 
         std::error_code error;
         cache_dir_ = std::filesystem::absolute(expand_user_path(raw_cache_dir), error).string();
@@ -127,14 +150,16 @@ namespace tts {
             options.speaker_id = piper_speaker_id_;
             options.timeout = std::chrono::milliseconds{backend_timeout_ms_};
             backend = std::make_unique<PiperBackend>(std::move(options));
-        } else if (backend_name_ == "paroli") {
+        }
+        else if (backend_name_ == "paroli") {
             ParoliOptions options;
             options.url = paroli_url_;
             options.sample_rate = static_cast<std::uint32_t>(std::max(0, paroli_sample_rate_));
             options.speaker_id = paroli_speaker_id_;
             options.timeout = std::chrono::milliseconds{backend_timeout_ms_};
             backend = std::make_unique<ParoliBackend>(std::move(options));
-        } else {
+        }
+        else {
             throw std::invalid_argument("unknown tts backend: " + backend_name_ +
                                         " (expected piper or paroli)");
         }
@@ -159,71 +184,97 @@ namespace tts {
         rclcpp::SubscriptionOptions text_options;
         text_options.callback_group = text_group_;
         text_subscription_ = node_->create_subscription<MsgTtsText>(
-                std::string{tts_interface::kPrivateTopicText},
-                rclcpp::QoS(rclcpp::KeepLast(10)).reliable(),
-                [this](const MsgTtsText::ConstSharedPtr& message) { on_text(message); },
-                text_options);
+            std::string{tts_interface::kPrivateTopicText},
+            rclcpp::QoS(rclcpp::KeepLast(10)).reliable(),
+            [this](const MsgTtsText::ConstSharedPtr& message) { on_text(message); },
+            text_options);
 
         rclcpp::SubscriptionOptions io_options;
         io_options.callback_group = io_group_;
         io_event_subscription_ = node_->create_subscription<audio_io_interface::msg::AudioEvent>(
-                io_event_topic,
-                rclcpp::QoS(rclcpp::KeepLast(50)).reliable(),
-                [this](const audio_io_interface::msg::AudioEvent::ConstSharedPtr& message) {
-                    on_audio_io_event(message);
-                },
-                io_options);
+            io_event_topic,
+            rclcpp::QoS(rclcpp::KeepLast(50)).reliable(),
+            [this](const audio_io_interface::msg::AudioEvent::ConstSharedPtr& message) {
+                on_audio_io_event(message);
+            },
+            io_options);
 
         event_publisher_ = node_->create_publisher<MsgTtsEvent>(
-                std::string{tts_interface::kPrivateTopicEvent},
-                rclcpp::QoS(rclcpp::KeepLast(50)).reliable());
+            std::string{tts_interface::kPrivateTopicEvent},
+            rclcpp::QoS(rclcpp::KeepLast(50)).reliable());
 
         clip_publisher_ = node_->create_publisher<audio_io_interface::msg::AudioClip>(
-                clip_topic, rclcpp::QoS(rclcpp::KeepLast(10)).reliable());
+            clip_topic, rclcpp::QoS(rclcpp::KeepLast(10)).reliable());
 
         synthesize_service_ = node_->create_service<SrvSynthesize>(
-                std::string{tts_interface::kPrivateServiceSynthesize},
-                [this](const std::shared_ptr<SrvSynthesize::Request>& request,
-                       std::shared_ptr<SrvSynthesize::Response> response) {
-                    on_synthesize(request, std::move(response));
-                },
-                rmw_qos_profile_services_default,
-                service_group_);
+            std::string{tts_interface::kPrivateServiceSynthesize},
+            [this](const std::shared_ptr<SrvSynthesize::Request>& request,
+                   std::shared_ptr<SrvSynthesize::Response> response) {
+                on_synthesize(request, std::move(response));
+            },
+            rmw_qos_profile_services_default,
+            service_group_);
 
         say_server_ = rclcpp_action::create_server<ActionSay>(
-                node_,
-                std::string{tts_interface::kPrivateActionSay},
-                [this](const rclcpp_action::GoalUUID& uuid,
-                       std::shared_ptr<const ActionSay::Goal> goal) {
-                    return on_say_goal(uuid, std::move(goal));
-                },
-                [this](const std::shared_ptr<SayGoalHandle>& goal_handle) {
-                    return on_say_cancel(goal_handle);
-                },
-                [this](const std::shared_ptr<SayGoalHandle>& goal_handle) {
-                    on_say_accepted(goal_handle);
-                },
-                rcl_action_server_get_default_options(),
-                action_group_);
+            node_,
+            std::string{tts_interface::kPrivateActionSay},
+            [this](const rclcpp_action::GoalUUID& uuid,
+                   std::shared_ptr<const ActionSay::Goal> goal) {
+                return on_say_goal(uuid, std::move(goal));
+            },
+            [this](const std::shared_ptr<SayGoalHandle>& goal_handle) {
+                return on_say_cancel(goal_handle);
+            },
+            [this](const std::shared_ptr<SayGoalHandle>& goal_handle) {
+                on_say_accepted(goal_handle);
+            },
+            rcl_action_server_get_default_options(),
+            action_group_);
     }
 
     void TtsNode::on_text(const MsgTtsText::ConstSharedPtr& message) {
+        const MsgTtsText request = *message;
         const std::string request_id = make_request_id();
-        const auto outcome = synthesize_cached(*message, request_id, nullptr);
-        if (!outcome) {
-            RCLCPP_ERROR(node_->get_logger(), "TTS text request %s failed: %s",
-                         request_id.c_str(), outcome.error().message.c_str());
+
+        if (const auto cached = lookup_cache(request, request_id)) {
+            if (request.play) {
+                if (scheduler_preempt_speech_) {
+                    scheduler_->preempt_lower_priority(JobPriority::High);
+                }
+                submit_clip(*cached, request, request_id, false);
+            }
             return;
         }
-        if (message->play) {
-            submit_clip(*outcome, *message, request_id, false);
+
+        SynthesisScheduler::Job job;
+        job.priority = JobPriority::High;
+        job.coalesce_key = "text:" + effective_group(request);
+        job.preempt_active = scheduler_preempt_speech_ && request.play;
+        job.run = [this, request, request_id](const std::atomic_bool& cancel) {
+            const auto outcome = synthesize_cached(request, request_id, &cancel);
+            if (!outcome || !request.play) {
+                return;
+            }
+            submit_clip(*outcome, request, request_id, false);
+        };
+        job.on_dropped = [this, request_id] {
+            publish_event(MsgTtsEvent::CANCELED, request_id, {}, 0.0F,
+                          "superseded by a newer text request");
+        };
+
+        if (!scheduler_->submit(std::move(job))) {
+            constexpr std::string_view error = "synthesis scheduler is full or stopped";
+            publish_event(MsgTtsEvent::FAILED, request_id, {}, 0.0F, std::string{error});
+            RCLCPP_WARN(node_->get_logger(), "TTS text request %s rejected: %s",
+                        request_id.c_str(), error.data());
         }
     }
 
     void TtsNode::on_synthesize(const std::shared_ptr<SrvSynthesize::Request>& request,
                                 std::shared_ptr<SrvSynthesize::Response> response) {
         const std::string request_id = make_request_id();
-        const auto outcome = synthesize_cached(request->request, request_id, nullptr);
+        const auto outcome = synthesize_blocking(request->request, request_id,
+                                                 JobPriority::High, false, nullptr);
         if (!outcome) {
             response->success = false;
             response->audio_uri.clear();
@@ -305,9 +356,33 @@ namespace tts {
             return;
         }
 
+        const auto finish = [&](const bool success) {
+            if (!goal_handle->is_canceling() && success) {
+                safe_goal_transition(node_->get_logger(), [&] {
+                    static_cast<void>(goal_handle->succeed(result));
+                });
+                return;
+            }
+            if (goal_handle->is_canceling()) {
+                safe_goal_transition(node_->get_logger(), [&] {
+                    static_cast<void>(goal_handle->canceled(result));
+                });
+                return;
+            }
+            // 内部抢占（例如状态文本打断播报）没有经过 rcl_action 的 cancel 请求，
+            // 只能走 ABORTED；对客户端仍表现为“未完成”。
+            safe_goal_transition(node_->get_logger(), [&] {
+                static_cast<void>(goal_handle->abort(result));
+            });
+        };
+
         for (std::size_t index = 0; index < sentences.size(); ++index) {
+            if (!goal_handle->is_active()) {
+                release();
+                return;
+            }
             if (goal_handle->is_canceling() || cancel_flag->load()) {
-                goal_handle->canceled(result);
+                finish(false);
                 release();
                 return;
             }
@@ -315,15 +390,12 @@ namespace tts {
             MsgTtsText piece = goal->text;
             piece.text = sentences[index];
             const std::string sentence_id =
-                    result->request_id + "-" + std::to_string(index);
+                result->request_id + "-" + std::to_string(index);
 
-            auto outcome = synthesize_cached(piece, sentence_id, cancel_flag.get());
+            auto outcome = synthesize_blocking(piece, sentence_id, JobPriority::Normal, false,
+                                               cancel_flag);
             if (!outcome) {
-                if (outcome.error().canceled || goal_handle->is_canceling()) {
-                    goal_handle->canceled(result);
-                } else {
-                    goal_handle->abort(result);
-                }
+                finish(false);
                 release();
                 return;
             }
@@ -334,18 +406,36 @@ namespace tts {
 
             auto feedback = std::make_shared<ActionSay::Feedback>();
             feedback->progress = static_cast<float>(index + 1) /
-                                 static_cast<float>(sentences.size());
+                static_cast<float>(sentences.size());
             feedback->current_sentence = sentences[index];
-            goal_handle->publish_feedback(feedback);
+            safe_goal_transition(node_->get_logger(), [&] {
+                goal_handle->publish_feedback(feedback);
+            });
         }
 
-        goal_handle->succeed(result);
+        finish(true);
         release();
     }
 
-    std::expected<TtsNode::SynthesisOutcome, TtsNode::SynthesisFailure>
-    TtsNode::synthesize_cached(const MsgTtsText& request, const std::string& request_id,
-                               const std::atomic_bool* cancel) {
+    std::optional<TtsNode::SynthesisOutcome>
+    TtsNode::lookup_cache(const MsgTtsText& request, const std::string& request_id) {
+        if (request.text.empty() || !backend_error_.empty()) {
+            return std::nullopt;
+        }
+        const std::string key = make_cache_key(request);
+        const auto cached = cache_->lookup(key);
+        if (!cached) {
+            return std::nullopt;
+        }
+        const auto wav = cache_->wav_path(key);
+        publish_event(MsgTtsEvent::CACHE_HIT, request_id, file_uri(wav), cached->duration_seconds,
+                      {});
+        return SynthesisOutcome{wav, cached->duration_seconds, true};
+    }
+
+    TtsNode::SynthesisAttempt TtsNode::synthesize_cached(const MsgTtsText& request,
+                                                         const std::string& request_id,
+                                                         const std::atomic_bool* cancel) {
         if (request.text.empty()) {
             publish_event(MsgTtsEvent::FAILED, request_id, {}, 0.0F, "text is empty");
             return std::unexpected(SynthesisFailure{false, "text is empty"});
@@ -376,14 +466,6 @@ namespace tts {
 
         cache_->evict();
         publish_event(MsgTtsEvent::SYNTHESIZE_STARTED, request_id, {}, 0.0F, {});
-
-        const std::unique_lock lock(backend_mutex_);
-        if (const auto cached = cache_->lookup(key)) {
-            const auto wav = cache_->wav_path(key);
-            publish_event(MsgTtsEvent::CACHE_HIT, request_id, file_uri(wav),
-                          cached->duration_seconds, {});
-            return SynthesisOutcome{wav, cached->duration_seconds, true};
-        }
         if (cancel != nullptr && cancel->load()) {
             publish_event(MsgTtsEvent::CANCELED, request_id, {}, 0.0F, "request canceled");
             return std::unexpected(SynthesisFailure{true, "request canceled"});
@@ -405,10 +487,16 @@ namespace tts {
             const bool canceled = synthesized.error().kind == BackendErrorKind::Canceled;
             publish_event(canceled ? MsgTtsEvent::CANCELED : MsgTtsEvent::FAILED, request_id, {},
                           0.0F, synthesized.error().message);
-            RCLCPP_ERROR(node_->get_logger(), "TTS request %s failed: %s", request_id.c_str(),
-                         synthesized.error().message.c_str());
+            if (canceled) {
+                RCLCPP_DEBUG(node_->get_logger(), "TTS request %s canceled: %s",
+                             request_id.c_str(), synthesized.error().message.c_str());
+            }
+            else {
+                RCLCPP_ERROR(node_->get_logger(), "TTS request %s failed: %s",
+                             request_id.c_str(), synthesized.error().message.c_str());
+            }
             return std::unexpected(
-                    SynthesisFailure{canceled, synthesized.error().message});
+                SynthesisFailure{canceled, synthesized.error().message});
         }
 
         if (auto committed = cache_->commit(synthesized->wav_path, key); !committed) {
@@ -424,6 +512,58 @@ namespace tts {
         RCLCPP_DEBUG(node_->get_logger(), "Synthesized request %s in %.3f s of audio",
                      request_id.c_str(), static_cast<double>(synthesized->duration_seconds));
         return SynthesisOutcome{wav, synthesized->duration_seconds, false};
+    }
+
+    TtsNode::SynthesisAttempt
+    TtsNode::synthesize_blocking(const MsgTtsText& request, const std::string& request_id,
+                                 const JobPriority priority, const bool preempt_active,
+                                 std::shared_ptr<std::atomic_bool> cancel) {
+        if (!scheduler_) {
+            return std::unexpected(
+                SynthesisFailure{false, "synthesis scheduler is not running"});
+        }
+
+        if (cancel != nullptr && cancel->load()) {
+            publish_event(MsgTtsEvent::CANCELED, request_id, {}, 0.0F, "request canceled");
+            return std::unexpected(SynthesisFailure{true, "request canceled"});
+        }
+        if (const auto cached = lookup_cache(request, request_id)) {
+            return *cached;
+        }
+
+        auto promise = std::make_shared<std::promise<SynthesisAttempt>>();
+        auto future = promise->get_future();
+
+        SynthesisScheduler::Job job;
+        job.priority = priority;
+        job.preempt_active = preempt_active;
+        job.cancel = std::move(cancel);
+        job.run = [this, request, request_id, promise](const std::atomic_bool& cancel_flag) {
+            SynthesisAttempt result = synthesize_cached(request, request_id, &cancel_flag);
+            try {
+                promise->set_value(std::move(result));
+            }
+            catch (const std::future_error&) {
+                // on_dropped 已给出结果；正常调度下不会发生。
+            }
+        };
+        job.on_dropped = [this, request_id, promise] {
+            publish_event(MsgTtsEvent::CANCELED, request_id, {}, 0.0F,
+                          "synthesis job dropped");
+            try {
+                promise->set_value(std::unexpected(
+                    SynthesisFailure{true, "synthesis job dropped"}));
+            }
+            catch (const std::future_error&) {
+            }
+        };
+
+        if (!scheduler_->submit(std::move(job))) {
+            constexpr std::string_view error = "synthesis scheduler is full or stopped";
+            publish_event(MsgTtsEvent::FAILED, request_id, {}, 0.0F, std::string{error});
+            return std::unexpected(SynthesisFailure{false, std::string{error}});
+        }
+        return future.get();
     }
 
     void TtsNode::submit_clip(const SynthesisOutcome& outcome, const MsgTtsText& request,
@@ -449,7 +589,7 @@ namespace tts {
     }
 
     void TtsNode::on_audio_io_event(
-            const audio_io_interface::msg::AudioEvent::ConstSharedPtr& message) {
+        const audio_io_interface::msg::AudioEvent::ConstSharedPtr& message) {
         using AudioEvent = audio_io_interface::msg::AudioEvent;
         if (message->request_id.empty()) {
             return;
@@ -470,26 +610,26 @@ namespace tts {
         }
 
         switch (message->event) {
-            case AudioEvent::EVENT_STARTED:
-                publish_event(MsgTtsEvent::PLAY_STARTED, message->request_id, record.uri,
-                              record.duration_seconds, {});
-                break;
-            case AudioEvent::EVENT_FINISHED:
-                publish_event(MsgTtsEvent::PLAY_FINISHED, message->request_id, record.uri,
-                              record.duration_seconds, {});
-                break;
-            case AudioEvent::EVENT_PREEMPTED:
-                publish_event(MsgTtsEvent::CANCELED, message->request_id, record.uri,
-                              record.duration_seconds,
-                              message->detail.empty() ? "preempted by audio_io" : message->detail);
-                break;
-            case AudioEvent::EVENT_FAILED:
-            case AudioEvent::EVENT_DECODE_FAILED:
-                publish_event(MsgTtsEvent::FAILED, message->request_id, record.uri, 0.0F,
-                              message->detail.empty() ? "audio_io playback failed" : message->detail);
-                break;
-            default:
-                break;
+        case AudioEvent::EVENT_STARTED:
+            publish_event(MsgTtsEvent::PLAY_STARTED, message->request_id, record.uri,
+                          record.duration_seconds, {});
+            break;
+        case AudioEvent::EVENT_FINISHED:
+            publish_event(MsgTtsEvent::PLAY_FINISHED, message->request_id, record.uri,
+                          record.duration_seconds, {});
+            break;
+        case AudioEvent::EVENT_PREEMPTED:
+            publish_event(MsgTtsEvent::CANCELED, message->request_id, record.uri,
+                          record.duration_seconds,
+                          message->detail.empty() ? "preempted by audio_io" : message->detail);
+            break;
+        case AudioEvent::EVENT_FAILED:
+        case AudioEvent::EVENT_DECODE_FAILED:
+            publish_event(MsgTtsEvent::FAILED, message->request_id, record.uri, 0.0F,
+                          message->detail.empty() ? "audio_io playback failed" : message->detail);
+            break;
+        default:
+            break;
         }
     }
 
@@ -559,7 +699,7 @@ namespace tts {
         const std::lock_guard lock(cancel_mutex_);
         if (create) {
             return cancel_flags_.try_emplace(uuid, std::make_shared<std::atomic_bool>(false))
-                    .first->second;
+                .first->second;
         }
         const auto found = cancel_flags_.find(uuid);
         if (found == cancel_flags_.end()) {

@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -16,6 +17,7 @@
 #include <rclcpp_action/rclcpp_action.hpp>
 
 #include "audio_io_interface/ros_msg.hpp"
+#include "tts/synthesis_scheduler.hpp"
 #include "tts/tts_backend.hpp"
 #include "tts/tts_cache.hpp"
 #include "tts_interface/ros_msg.hpp"
@@ -83,6 +85,8 @@ namespace tts {
             std::string message;
         };
 
+        using SynthesisAttempt = std::expected<SynthesisOutcome, SynthesisFailure>;
+
         struct SubmittedClip {
             std::string uri;
             float duration_seconds{0.0F};
@@ -103,9 +107,16 @@ namespace tts {
         void execute_say(const std::shared_ptr<SayGoalHandle>& goal_handle);
         void on_audio_io_event(const audio_io_interface::msg::AudioEvent::ConstSharedPtr& message);
 
-        [[nodiscard]] std::expected<SynthesisOutcome, SynthesisFailure>
-        synthesize_cached(const MsgTtsText& request, const std::string& request_id,
-                          const std::atomic_bool* cancel);
+        [[nodiscard]] std::optional<SynthesisOutcome> lookup_cache(const MsgTtsText& request,
+                                                                   const std::string& request_id);
+        [[nodiscard]] SynthesisAttempt synthesize_cached(const MsgTtsText& request,
+                                                         const std::string& request_id,
+                                                         const std::atomic_bool* cancel);
+        [[nodiscard]] SynthesisAttempt synthesize_blocking(const MsgTtsText& request,
+                                                           const std::string& request_id,
+                                                           JobPriority priority,
+                                                           bool preempt_active,
+                                                           std::shared_ptr<std::atomic_bool> cancel);
         void submit_clip(const SynthesisOutcome& outcome, const MsgTtsText& request,
                          const std::string& request_id, bool queue);
         void publish_event(std::uint8_t event, const std::string& request_id,
@@ -139,12 +150,15 @@ namespace tts {
         std::string default_group_;
         double default_volume_{1.0};
         int max_sentence_chars_{120};
+        int scheduler_max_pending_{16};
+        bool scheduler_preempt_speech_{true};
         std::string cache_dir_;
         std::int64_t cache_max_bytes_{0};
 
         std::unique_ptr<TtsBackend> backend_;
         std::string backend_error_;
         std::unique_ptr<TtsCache> cache_;
+        std::unique_ptr<SynthesisScheduler> scheduler_;
 
         rclcpp::CallbackGroup::SharedPtr text_group_;
         rclcpp::CallbackGroup::SharedPtr io_group_;
@@ -157,7 +171,6 @@ namespace tts {
         rclcpp::Service<SrvSynthesize>::SharedPtr synthesize_service_;
         rclcpp_action::Server<ActionSay>::SharedPtr say_server_;
 
-        std::mutex backend_mutex_;
         std::atomic<std::uint64_t> request_counter_{0};
 
         mutable std::mutex clips_mutex_;
@@ -166,7 +179,7 @@ namespace tts {
 
         std::mutex cancel_mutex_;
         std::unordered_map<rclcpp_action::GoalUUID, std::shared_ptr<std::atomic_bool>, GoalUuidHash>
-                cancel_flags_;
+            cancel_flags_;
 
         std::mutex say_mutex_;
         std::condition_variable say_cv_;

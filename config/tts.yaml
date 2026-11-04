@@ -51,6 +51,12 @@
     # 长文本按句合成时单句的最大码点数；超过后硬切。
     max_sentence_chars: 120
 
+    scheduler:
+      # 合成任务等待队列上限；超过后新请求直接失败（事件 FAILED），避免无限堆积。
+      max_pending: 16
+      # ~/text(play=true) 是否取消正在合成/排队的 ~/say 句子：状态播报打断长文。
+      preempt_speech: true
+
     cache:
       # 缓存目录；键为 text + 音色 + 语速 + 音高的哈希。
       dir: ~/.cache/robot_audio/tts
