@@ -33,6 +33,17 @@
 - `~/text`：`REPLACE_SAME_GROUP`，新一句替换旧一句；
 - `~/say`：`QUEUE`，逐句按顺序播放。
 
+## 合成调度
+
+`SynthesisScheduler` 用一条工作线程串行执行所有后端推理（不会并行占用 CPU/NPU）：
+
+- 优先级：`~/text`、`~/synthesize` 为 High，`~/say` 句子为 Normal，同优先级 FIFO；
+- 缓存命中在调用线程直接返回/提交播放，不进入调度队列；
+- 同一 `group` 的等待中 `~/text` 只保留最新一条，旧任务发布 `CANCELED`（"superseded"）；
+- `scheduler.preempt_speech=true` 时，`~/text`(`play=true`) 会取消正在执行和排队的 `~/say`
+  任务：say goal 走 `ABORTED`（客户端主动 cancel 才是 `CANCELED`），随后播放状态文本；
+- 等待队列满（`scheduler.max_pending`）时新请求直接失败并发 `FAILED`，不会无限堆积。
+
 `~/synthesize` 忽略 `TtsText.play`。`voice_id` 为空表示使用后端默认音色，数字字符串表示
 多说话人模型的 speaker id；其他字符串会被拒绝。`rate` 是语速倍率（`length_scale = 1/rate`），
 `pitch` 目前不生效（日志会提示）。`volume=0` 使用 `default.volume`。
@@ -60,6 +71,8 @@
 | `default.group` | `tts` | 默认音频焦点组 |
 | `default.volume` | `1.0` | `volume=0` 时的线性增益 |
 | `max_sentence_chars` | `120` | `~/say` 单句最大码点数 |
+| `scheduler.max_pending` | `16` | 合成等待队列上限；超出后请求失败 |
+| `scheduler.preempt_speech` | `true` | `~/text`(`play=true`) 是否取消 say 任务 |
 | `cache.dir` | `~/.cache/robot_audio/tts` | 缓存目录 |
 | `cache.max_bytes` | `268435456` | LRU 上限；0 = 不限制 |
 | `log.*` | common_cpp 默认 | `log_level` / `log_path` / `async` |
@@ -144,3 +157,5 @@ colcon test-result --test-result-base build/tts/test_results --verbose
 - 不发布 `AudioStream`，所有播放都走 `AudioClip` + 文件缓存；首句延迟等于一次完整合成。
 - 不支持 `pitch`；需要变调时应在后端外部做重采样/变调。
 - 没有 eSpeak/云后端，也没有自动 fallback；`piper`/`paroli` 由参数显式选择。
+- 调度队列只在内存中，进程崩溃会丢失等待任务；优先级固定，不可运行时调整。
+- 被状态文本抢占的 `say` goal 返回 `ABORTED`，不是 `CANCELED`（后者只对应客户端 cancel）。

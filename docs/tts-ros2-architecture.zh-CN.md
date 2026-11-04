@@ -120,8 +120,12 @@ tts_node (可执行)
   └─ MultiThreadedExecutor(4)
        └─ tts::TtsNode(node)        ← 组合式，不继承 rclcpp::Node
             ├─ 回调组：text / io event / service / action（各自 mutually exclusive）
-            ├─ say 工作线程（std::jthread + 队列）
-            ├─ backend_mutex_：同一时刻只跑一个后端合成
+            ├─ say 工作线程（std::jthread + goal 队列）
+            ├─ SynthesisScheduler
+            │    ├─ 单工作线程：唯一后端推理
+            │    ├─ 优先级队列：High(text/service) > Normal(say)
+            │    ├─ text 同组最新覆盖（coalesce）
+            │    └─ preempt_speech：状态 text 取消 say 任务
             ├─ TtsBackend（piper 或 paroli）
             └─ TtsCache
 ```
@@ -133,30 +137,31 @@ tts_node (可执行)
 - **两个 target**：`libtts` 承载节点、后端、缓存与音频工具；`tts_node` 只做 ROS 组合与
   日志初始化。库不链接 `common_cpp_ros_logging`，避免进程级副作用。
 - **回调隔离 ≠ 并行合成**：`~/text`、`~/synthesize`、`~/say`、`~/event`/`audio_io` 事件分属
-  不同 callback group，隔离的是“接收、取消、事件回调不会被某个长回调卡住”；
-  **后端推理由 `backend_mutex_` 串行**，同一时刻最多一个 piper/paroli 合成，不会并发占用
-  CPU/NPU 或重复加载模型。缓存命中在锁外完成，可以在别的请求合成期间直接返回。
-- **合成串行**：后端可能有子进程/HTTP 状态，`backend_mutex_` 保证单飞；缓存二次检查
-  避免并发重复合成。
-- **取消**：action cancel 置位 `std::atomic_bool`；piper 会杀掉子进程组，paroli 会中止
-  curl 传输。取消后清理临时文件并发布 `CANCELED`。
+  不同 callback group，隔离的是“接收、取消、事件回调不会被某个长回调卡住”。
+- **单工作线程调度**：`SynthesisScheduler` 用一条工作线程执行所有后端推理，同一时刻最多
+  一个 piper/paroli 合成，不会并发占用 CPU/NPU 或重复加载模型。优先级：`~/text` 与
+  `~/synthesize` 为 High，`~/say` 句子为 Normal；同优先级 FIFO。
+- **缓存快路径**：`~/text`/`~/synthesize`/`~/say` 先在调用线程查缓存；命中直接返回/提交
+  播放，不进入调度队列。`play=true` 的 text 命中缓存时仍会按 `preempt_speech` 取消 say 任务。
+- **取消**：action cancel 置位 `std::atomic_bool`；调度器把同一个标志传给后端。piper 会杀掉
+  子进程组，paroli 会中止 curl 传输；取消后清理临时文件并发布 `CANCELED`。
 
 ### 3.1 并发与阻塞
 
 | 情况 | 实际行为 |
 |---|---|
-| `~/text` 冷合成 + `~/synthesize` 冷合成 | service 在 `backend_mutex_` 上等待；不会并行推理 |
-| 后端忙时另一个请求命中缓存 | 直接返回缓存 URI / 提交播放，不等待后端 |
-| `~/say` 正在逐句合成 + 新 `~/text` | `say` 在句与句之间释放锁，text 可在句子间隔插入；正在合成的那一句不可抢占，除非取消 goal |
+| `~/text` 冷合成 + `~/synthesize` 冷合成 | 单工作线程按 High 优先级 FIFO 执行；不会并行推理 |
+| 任一请求命中缓存 | 调用线程直接返回/提交播放，不进队列 |
+| `~/say` 合成中收到 `~/text`（`play=true`，`preempt_speech=true`） | 取消正在执行及排队的 say 任务；say goal 走 `ABORTED`（若客户端发过 cancel 则走 `CANCELED`），text 随后播放 |
+| 多条同 group 的 `~/text` 等待中 | 旧任务被最新任务覆盖，旧任务发布 `CANCELED`（"superseded"） |
+| 等待队列满（`scheduler.max_pending`） | 新请求直接失败，发布 `FAILED`，不无限堆积 |
 | 长合成期间 `audio_io` 事件 | io 回调在独立 group/线程，正常映射 `PLAY_*` |
-| 长合成期间 action cancel | cancel 回调立即置位取消标志，后端在下一次轮询中止 |
-| 多个 `~/text` 连续到达 | 订阅的 group 互斥：同一时刻最多一个 text 回调在合成/等锁，其余消息在执行器队列里排队，不额外占线程 |
+| action cancel | cancel 回调置位 goal 标志；调度器/后端立即响应，goal 走 `CANCELED` |
 
-执行器是 4 线程：`~/text` 与 `~/synthesize` 各最多占 1 个等待线程，`~/say` 合成跑在
-独立工作线程，因此事件订阅通常仍有线程可用。压力不在“并行推理”，而在**排队延迟**：
-后到的电量/状态短句可能排在一段长播报之后。板端建议：长内容统一走 `~/say`，状态类短句
-走 `~/text`，客户端避免同时发起多条互不相关的合成；需要“状态优先打断播报”时，应在应用
-层先取消 `say` goal 再发 `~/text`。
+`~/text` 回调只做入队，不阻塞执行器；`~/synthesize` 等待 future（占 1 个执行器线程）；
+`~/say` 在独立工作线程逐句等待。调度器保证“最新状态打断长播报、旧 text 不堆积”，但
+不会并行推理：板端压力仍是单次合成的绝对耗时，而不是并发。`preempt_speech=false` 时
+text 只按优先级排在 say 句子之间，不取消 say。
 
 ---
 
@@ -230,6 +235,8 @@ synthesize(const SynthesisRequest& request) = 0;
 | `default.group` | `tts` | 默认音频焦点组 |
 | `default.volume` | `1.0` | `volume=0` 时的增益 |
 | `max_sentence_chars` | `120` | `~/say` 单句最大码点数 |
+| `scheduler.max_pending` | `16` | 合成等待队列上限；超出后请求失败 |
+| `scheduler.preempt_speech` | `true` | `~/text`(`play=true`) 是否取消 say 任务 |
 | `cache.dir` | `~/.cache/robot_audio/tts` | 缓存目录 |
 | `cache.max_bytes` | `268435456` | LRU 上限；0 = 不限制 |
 | `log.log_level` | `info` | common_cpp |
@@ -354,5 +361,6 @@ ros2 topic echo /audio_tts/event
   不能把半句反复发 `~/text`，否则 `REPLACE_SAME_GROUP` 会互相打断。
 - 没有 eSpeak/云后端和自动 fallback；后端由参数显式选择。
 - REST paroli 不流式；WebSocket 流式接口尚未接入。
-- 合成没有优先级队列/合并：后到的短状态请求只能等当前合成结束；需要“状态抢占播报”时
-  由客户端取消 `say` goal。若后续加入调度器，应保留单飞推理并按优先级/最新覆盖排队。
+- 调度队列只在内存中，进程崩溃会丢失等待任务；不持久化、不重放。
+- 优先级固定为 text/service High、say Normal；没有运行时可调优先级或按 group 的权重。
+- `preempt_speech` 依赖 text 的 `play=true`；只合成不播放的 `synthesize` 不会打断播报。
