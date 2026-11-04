@@ -153,7 +153,7 @@ if (BUILD_EXE)
     install(TARGETS tts_node
             DESTINATION lib/${PROJECT_NAME}
     )
-    install(DIRECTORY config launch
+    install(DIRECTORY config launch docs
             DESTINATION share/${PROJECT_NAME}
             PATTERN "__pycache__" EXCLUDE
             PATTERN "*.pyc" EXCLUDE
