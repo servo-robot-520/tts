@@ -1,0 +1,63 @@
+/**:
+  ros__parameters:
+    # 合成后端：piper = 本地 CLI 子进程；paroli = paroli-server HTTP。
+    backend: piper
+
+    piper:
+      # 可执行文件；不带 '/' 时在 PATH 中查找。tools/install_piper.sh 会下载到
+      # ~/.local/share/tts/piper/piper/piper。
+      executable: ~/.local/share/tts/piper/piper/piper
+
+      # Piper voice 模型；默认是 tools/install_piper.sh 安装的中文音色。
+      model: ~/.local/share/tts/voices/zh_CN-huayan-medium.onnx
+
+      # 模型配置；空 = 使用 <model>.json。
+      config: ""
+
+      # espeak-ng-data 目录；空 = piper 在自身目录旁查找。
+      espeak_data: ""
+
+      # 多说话人模型的默认 speaker；-1 = 不传 --speaker。
+      # 请求里的 TtsText.voice_id 为数字时优先使用它。
+      speaker: -1
+
+    paroli:
+      # paroli-server 根地址；实际请求 POST <url>/api/v1/synthesise。
+      url: http://127.0.0.1:8848
+
+      # paroli 返回裸 PCM，响应没有采样率字段；必须与模型原生采样率一致。
+      # 例如 ljspeech streaming 模型是 22050。
+      sample_rate: 22050
+
+      # 多说话人模型的默认 speaker；-1 = 不发送 speaker_id。
+      speaker_id: -1
+
+    # 单次合成的超时；piper 超时会杀掉子进程，paroli 会中止 HTTP 请求。
+    "backend.timeout_ms": 30000
+
+    audio_io:
+      # 播放所有者节点全名；多机器人时改成 /robot1/audio_io。
+      node: /audio_io
+
+    # AudioClip 的 frame_id。
+    frame_id: audio
+
+    default:
+      # TtsText.group 为空时使用的音频焦点组。
+      group: tts
+      # TtsText.volume 为 0 时使用的线性音量。
+      volume: 1.0
+
+    # 长文本按句合成时单句的最大码点数；超过后硬切。
+    max_sentence_chars: 120
+
+    cache:
+      # 缓存目录；键为 text + 音色 + 语速 + 音高的哈希。
+      dir: ~/.cache/robot_audio/tts
+      # 缓存总上限，单位字节；0 = 不限制，按 mtime 做 LRU 清理。
+      max_bytes: 268435456
+
+    log:
+      log_level: info
+      log_path: ./log
+      async: false
