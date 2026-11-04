@@ -132,12 +132,31 @@ tts_node (可执行)
   执行器，共享参数与回调组。
 - **两个 target**：`libtts` 承载节点、后端、缓存与音频工具；`tts_node` 只做 ROS 组合与
   日志初始化。库不链接 `common_cpp_ros_logging`，避免进程级副作用。
-- **回调隔离**：`~/text`、`~/synthesize`、`~/say`、`~/event`/`audio_io` 事件分属不同
-  callback group；一次长合成不会阻塞事件订阅或其他接口。
+- **回调隔离 ≠ 并行合成**：`~/text`、`~/synthesize`、`~/say`、`~/event`/`audio_io` 事件分属
+  不同 callback group，隔离的是“接收、取消、事件回调不会被某个长回调卡住”；
+  **后端推理由 `backend_mutex_` 串行**，同一时刻最多一个 piper/paroli 合成，不会并发占用
+  CPU/NPU 或重复加载模型。缓存命中在锁外完成，可以在别的请求合成期间直接返回。
 - **合成串行**：后端可能有子进程/HTTP 状态，`backend_mutex_` 保证单飞；缓存二次检查
   避免并发重复合成。
 - **取消**：action cancel 置位 `std::atomic_bool`；piper 会杀掉子进程组，paroli 会中止
   curl 传输。取消后清理临时文件并发布 `CANCELED`。
+
+### 3.1 并发与阻塞
+
+| 情况 | 实际行为 |
+|---|---|
+| `~/text` 冷合成 + `~/synthesize` 冷合成 | service 在 `backend_mutex_` 上等待；不会并行推理 |
+| 后端忙时另一个请求命中缓存 | 直接返回缓存 URI / 提交播放，不等待后端 |
+| `~/say` 正在逐句合成 + 新 `~/text` | `say` 在句与句之间释放锁，text 可在句子间隔插入；正在合成的那一句不可抢占，除非取消 goal |
+| 长合成期间 `audio_io` 事件 | io 回调在独立 group/线程，正常映射 `PLAY_*` |
+| 长合成期间 action cancel | cancel 回调立即置位取消标志，后端在下一次轮询中止 |
+| 多个 `~/text` 连续到达 | 订阅的 group 互斥：同一时刻最多一个 text 回调在合成/等锁，其余消息在执行器队列里排队，不额外占线程 |
+
+执行器是 4 线程：`~/text` 与 `~/synthesize` 各最多占 1 个等待线程，`~/say` 合成跑在
+独立工作线程，因此事件订阅通常仍有线程可用。压力不在“并行推理”，而在**排队延迟**：
+后到的电量/状态短句可能排在一段长播报之后。板端建议：长内容统一走 `~/say`，状态类短句
+走 `~/text`，客户端避免同时发起多条互不相关的合成；需要“状态优先打断播报”时，应在应用
+层先取消 `say` goal 再发 `~/text`。
 
 ---
 
@@ -335,3 +354,5 @@ ros2 topic echo /audio_tts/event
   不能把半句反复发 `~/text`，否则 `REPLACE_SAME_GROUP` 会互相打断。
 - 没有 eSpeak/云后端和自动 fallback；后端由参数显式选择。
 - REST paroli 不流式；WebSocket 流式接口尚未接入。
+- 合成没有优先级队列/合并：后到的短状态请求只能等当前合成结束；需要“状态抢占播报”时
+  由客户端取消 `say` goal。若后续加入调度器，应保留单飞推理并按优先级/最新覆盖排队。
