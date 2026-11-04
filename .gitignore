@@ -1,0 +1,43 @@
+.idea
+
+# CMake
+cmake-build-*/
+symlink_install_manifest.txt
+CMakeFiles
+
+# ros2
+build
+log
+install
+.ws_tools_build.lock
+
+# log
+logs
+
+# python
+.venv
+venv
+*.egg-info
+.env
+*.fuse_**
+.cache
+__pycache__
+
+# vibe coding
+.claude
+.mimocode
+.codex
+.opencode
+.agents
+.superpowers
+.planning
+**/superpowers/
+**/design/
+**/plans/
+AGENTS.md
+findings.md
+progress.md
+task_plan.md
+
+# uv
+uv.lock
