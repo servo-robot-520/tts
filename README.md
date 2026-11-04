@@ -17,7 +17,8 @@
 | `paroli` | HTTP `POST <url>/api/v1/synthesise`，请求裸 PCM 后写 WAV | RK3566 等板端，由 paroli-server 使用 RKNN/NPU 加速 |
 
 两个后端都使用 Piper 模型；`paroli` 需要 encoder/decoder 分离的 streaming ONNX 模型，
-`piper` 使用普通 `.onnx` voice。接口/消息定义见 `tts_interface` 包。
+`piper` 使用普通 `.onnx` voice。接口/消息定义见 `tts_interface`。完整架构、接口语义、缓存与延迟说明见
+[`docs/tts-ros2-architecture.zh-CN.md`](docs/tts-ros2-architecture.zh-CN.md)。
 
 ## 接口
 
