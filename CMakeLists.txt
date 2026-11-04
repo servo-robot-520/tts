@@ -59,6 +59,7 @@ add_library(tts SHARED
         include/tts/piper_backend.hpp
         include/tts/process_runner.hpp
         include/tts/sentence_splitter.hpp
+        include/tts/synthesis_scheduler.hpp
         include/tts/tts_backend.hpp
         include/tts/tts_cache.hpp
         include/tts/tts_node.hpp
@@ -68,6 +69,7 @@ add_library(tts SHARED
         src/piper_backend.cpp
         src/process_runner.cpp
         src/sentence_splitter.cpp
+        src/synthesis_scheduler.cpp
         src/tts_cache.cpp
         src/tts_node.cpp
         src/wav_io.cpp
@@ -183,6 +185,9 @@ if (BUILD_TESTING)
 
     ament_add_gtest(test_process_runner test/test_process_runner.cpp)
     target_link_libraries(test_process_runner tts)
+
+    ament_add_gtest(test_synthesis_scheduler test/test_synthesis_scheduler.cpp)
+    target_link_libraries(test_synthesis_scheduler tts)
 endif ()
 
 ament_export_include_directories(include)
