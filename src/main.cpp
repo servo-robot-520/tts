@@ -22,12 +22,14 @@ int main(const int argc, char** argv) {
         executor.add_node(node);
         executor.spin();
         executor.remove_node(node);
-    } catch (const std::exception& exception) {
+    }
+    catch (const std::exception& exception) {
         RCLCPP_FATAL(node->get_logger(), "TTS node terminated: %s", exception.what());
         logging::ros::RclcppLogHandler::shutdown();
         rclcpp::shutdown();
         return 1;
-    } catch (...) {
+    }
+    catch (...) {
         RCLCPP_FATAL(node->get_logger(), "TTS node terminated with an unknown error");
         logging::ros::RclcppLogHandler::shutdown();
         rclcpp::shutdown();

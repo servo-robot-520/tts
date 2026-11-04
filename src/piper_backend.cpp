@@ -41,7 +41,7 @@ namespace tts {
                 const auto directory = paths.substr(0, separator);
                 if (!directory.empty()) {
                     const std::string candidate =
-                            (std::filesystem::path{directory} / name).string();
+                        (std::filesystem::path{directory} / name).string();
                     if (::access(candidate.c_str(), X_OK) == 0) {
                         return candidate;
                     }
@@ -126,7 +126,9 @@ namespace tts {
         return arguments;
     }
 
-    PiperBackend::PiperBackend(PiperOptions options) : options_(std::move(options)) {}
+    PiperBackend::PiperBackend(PiperOptions options) :
+        options_(std::move(options)) {
+    }
 
     std::string_view PiperBackend::name() const noexcept {
         return "piper";
@@ -161,8 +163,8 @@ namespace tts {
         const auto modified = std::filesystem::last_write_time(options_.model, error);
         const auto stamp = error ? 0 : modified.time_since_epoch().count();
         return "piper|" + resolved_executable_ + "|" + options_.model.string() + "|" +
-               std::to_string(static_cast<long long>(stamp)) + "|" + options_.config.string() +
-               "|" + options_.espeak_data + "|" + std::to_string(options_.speaker_id);
+            std::to_string(static_cast<long long>(stamp)) + "|" + options_.config.string() +
+            "|" + options_.espeak_data + "|" + std::to_string(options_.speaker_id);
     }
 
     std::expected<SynthesisResult, BackendError>
@@ -173,9 +175,9 @@ namespace tts {
         }
         if (!request.voice_id.empty() && !parse_positive_int(request.voice_id)) {
             return std::unexpected(BackendError{
-                    BackendErrorKind::InvalidRequest,
-                    "piper voice_id must be empty or a numeric speaker id, got: " +
-                            request.voice_id});
+                BackendErrorKind::InvalidRequest,
+                "piper voice_id must be empty or a numeric speaker id, got: " +
+                    request.voice_id});
         }
         if (request.output_wav.empty()) {
             return std::unexpected(BackendError{BackendErrorKind::InvalidRequest,
@@ -199,14 +201,14 @@ namespace tts {
         }
         if (outcome->timed_out) {
             return std::unexpected(BackendError{
-                    BackendErrorKind::Timeout,
-                    "piper timed out after " + std::to_string(options_.timeout.count()) + " ms"});
+                BackendErrorKind::Timeout,
+                "piper timed out after " + std::to_string(options_.timeout.count()) + " ms"});
         }
         if (outcome->exit_code != 0) {
             return std::unexpected(BackendError{
-                    BackendErrorKind::Failed,
-                    "piper exited with " + std::to_string(outcome->exit_code) + ": " +
-                            last_stderr(outcome->stderr_text)});
+                BackendErrorKind::Failed,
+                "piper exited with " + std::to_string(outcome->exit_code) + ": " +
+                    last_stderr(outcome->stderr_text)});
         }
 
         const auto info = read_wav_info(request.output_wav);

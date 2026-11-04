@@ -32,9 +32,9 @@ namespace tts {
 
         std::uint32_t read_u32(const char* data) {
             return static_cast<std::uint32_t>(static_cast<unsigned char>(data[0])) |
-                   (static_cast<std::uint32_t>(static_cast<unsigned char>(data[1])) << 8U) |
-                   (static_cast<std::uint32_t>(static_cast<unsigned char>(data[2])) << 16U) |
-                   (static_cast<std::uint32_t>(static_cast<unsigned char>(data[3])) << 24U);
+                (static_cast<std::uint32_t>(static_cast<unsigned char>(data[1])) << 8U) |
+                (static_cast<std::uint32_t>(static_cast<unsigned char>(data[2])) << 16U) |
+                (static_cast<std::uint32_t>(static_cast<unsigned char>(data[3])) << 24U);
         }
 
     } // namespace
@@ -93,7 +93,7 @@ namespace tts {
         info.bits_per_sample = 16;
         info.sample_frames = samples.size() / channels;
         info.duration_seconds = static_cast<float>(info.sample_frames) /
-                                static_cast<float>(sample_rate);
+            static_cast<float>(sample_rate);
         return info;
     }
 
@@ -139,21 +139,23 @@ namespace tts {
                                  std::ios::cur);
                 }
                 have_format = true;
-            } else if (std::memcmp(chunk_header, "data", 4) == 0) {
+            }
+            else if (std::memcmp(chunk_header, "data", 4) == 0) {
                 if (!have_format || info.channels == 0 || info.sample_rate == 0 ||
                     info.bits_per_sample == 0) {
                     return std::unexpected(path.string() + " has data before a valid fmt chunk");
                 }
                 const std::uint64_t bytes_per_frame =
-                        static_cast<std::uint64_t>(info.channels) * (info.bits_per_sample / 8U);
+                    static_cast<std::uint64_t>(info.channels) * (info.bits_per_sample / 8U);
                 if (bytes_per_frame == 0) {
                     return std::unexpected(path.string() + " has an invalid block alignment");
                 }
                 info.sample_frames = chunk_size / bytes_per_frame;
                 info.duration_seconds = static_cast<float>(info.sample_frames) /
-                                        static_cast<float>(info.sample_rate);
+                    static_cast<float>(info.sample_rate);
                 have_data = true;
-            } else {
+            }
+            else {
                 stream.seekg(static_cast<std::streamoff>(chunk_size), std::ios::cur);
             }
 

@@ -39,36 +39,37 @@ namespace tts {
             output.push_back('"');
             for (const unsigned char character : value) {
                 switch (character) {
-                    case '"':
-                        output.append("\\\"");
-                        break;
-                    case '\\':
-                        output.append("\\\\");
-                        break;
-                    case '\b':
-                        output.append("\\b");
-                        break;
-                    case '\f':
-                        output.append("\\f");
-                        break;
-                    case '\n':
-                        output.append("\\n");
-                        break;
-                    case '\r':
-                        output.append("\\r");
-                        break;
-                    case '\t':
-                        output.append("\\t");
-                        break;
-                    default:
-                        if (character < 0x20U) {
-                            output.append("\\u00");
-                            output.push_back(kHex[character >> 4U]);
-                            output.push_back(kHex[character & 0x0FU]);
-                        } else {
-                            output.push_back(static_cast<char>(character));
-                        }
-                        break;
+                case '"':
+                    output.append("\\\"");
+                    break;
+                case '\\':
+                    output.append("\\\\");
+                    break;
+                case '\b':
+                    output.append("\\b");
+                    break;
+                case '\f':
+                    output.append("\\f");
+                    break;
+                case '\n':
+                    output.append("\\n");
+                    break;
+                case '\r':
+                    output.append("\\r");
+                    break;
+                case '\t':
+                    output.append("\\t");
+                    break;
+                default:
+                    if (character < 0x20U) {
+                        output.append("\\u00");
+                        output.push_back(kHex[character >> 4U]);
+                        output.push_back(kHex[character & 0x0FU]);
+                    }
+                    else {
+                        output.push_back(static_cast<char>(character));
+                    }
+                    break;
                 }
             }
             output.push_back('"');
@@ -143,7 +144,9 @@ namespace tts {
         return json;
     }
 
-    ParoliBackend::ParoliBackend(ParoliOptions options) : options_(std::move(options)) {}
+    ParoliBackend::ParoliBackend(ParoliOptions options) :
+        options_(std::move(options)) {
+    }
 
     std::string_view ParoliBackend::name() const noexcept {
         return "paroli";
@@ -165,7 +168,7 @@ namespace tts {
 
     std::string ParoliBackend::fingerprint() const {
         return "paroli|" + options_.url + "|" + std::to_string(options_.sample_rate) + "|" +
-               std::to_string(options_.speaker_id);
+            std::to_string(options_.speaker_id);
     }
 
     std::expected<SynthesisResult, BackendError>
@@ -176,9 +179,9 @@ namespace tts {
         }
         if (!request.voice_id.empty() && !parse_positive_int(request.voice_id)) {
             return std::unexpected(BackendError{
-                    BackendErrorKind::InvalidRequest,
-                    "paroli voice_id must be empty or a numeric speaker id, got: " +
-                            request.voice_id});
+                BackendErrorKind::InvalidRequest,
+                "paroli voice_id must be empty or a numeric speaker id, got: " +
+                    request.voice_id});
         }
         if (request.output_wav.empty()) {
             return std::unexpected(BackendError{BackendErrorKind::InvalidRequest,
@@ -228,19 +231,19 @@ namespace tts {
         }
         if (performed == CURLE_OPERATION_TIMEDOUT) {
             return std::unexpected(BackendError{
-                    BackendErrorKind::Timeout,
-                    "paroli timed out after " + std::to_string(options_.timeout.count()) + " ms"});
+                BackendErrorKind::Timeout,
+                "paroli timed out after " + std::to_string(options_.timeout.count()) + " ms"});
         }
         if (performed != CURLE_OK) {
             return std::unexpected(BackendError{
-                    BackendErrorKind::Failed,
-                    std::string{"paroli request failed: "} + curl_easy_strerror(performed)});
+                BackendErrorKind::Failed,
+                std::string{"paroli request failed: "} + curl_easy_strerror(performed)});
         }
         if (response_code != 200) {
             return std::unexpected(BackendError{
-                    BackendErrorKind::Failed,
-                    "paroli-server returned HTTP " + std::to_string(response_code) + ": " +
-                            http_body_preview(body)});
+                BackendErrorKind::Failed,
+                "paroli-server returned HTTP " + std::to_string(response_code) + ": " +
+                    http_body_preview(body)});
         }
         if (body.empty()) {
             return std::unexpected(BackendError{BackendErrorKind::Failed,

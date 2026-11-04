@@ -25,13 +25,16 @@ namespace tts {
             if ((first & 0xE0U) == 0xC0U) {
                 length = 2;
                 value = first & 0x1FU;
-            } else if ((first & 0xF0U) == 0xE0U) {
+            }
+            else if ((first & 0xF0U) == 0xE0U) {
                 length = 3;
                 value = first & 0x0FU;
-            } else if ((first & 0xF8U) == 0xF0U) {
+            }
+            else if ((first & 0xF8U) == 0xF0U) {
                 length = 4;
                 value = first & 0x07U;
-            } else {
+            }
+            else {
                 return {0xFFFDU, 1};
             }
 
@@ -50,7 +53,7 @@ namespace tts {
 
         bool is_space(const char32_t character) {
             return character == U' ' || character == U'\t' || character == U'\r' ||
-                   character == U'\n' || character == U'\v' || character == U'\f';
+                character == U'\n' || character == U'\v' || character == U'\f';
         }
 
         bool is_digit(const char32_t character) {
@@ -59,18 +62,18 @@ namespace tts {
 
         bool is_terminator(const char32_t character) {
             switch (character) {
-                case U'.':
-                case U'!':
-                case U'?':
-                case U';':
-                case U'\n':
-                case U'\u3002': // 。
-                case U'\uFF01': // ！
-                case U'\uFF1F': // ？
-                case U'\uFF1B': // ；
-                    return true;
-                default:
-                    return false;
+            case U'.':
+            case U'!':
+            case U'?':
+            case U';':
+            case U'\n':
+            case U'\u3002': // 。
+            case U'\uFF01': // ！
+            case U'\uFF1F': // ？
+            case U'\uFF1B': // ；
+                return true;
+            default:
+                return false;
             }
         }
 
@@ -116,8 +119,9 @@ namespace tts {
                 bool should_break = true;
                 if (character == U'.' && index + 1 < codepoints.size() && is_digit(codepoints[index + 1])) {
                     should_break = false;
-                } else if (character == U'.' && index + 1 < codepoints.size() &&
-                           codepoints[index + 1] == U'.') {
+                }
+                else if (character == U'.' && index + 1 < codepoints.size() &&
+                         codepoints[index + 1] == U'.') {
                     should_break = false;
                 }
                 if (should_break) {

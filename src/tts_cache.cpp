@@ -23,8 +23,8 @@ namespace tts {
                 throw std::runtime_error("EVP_MD_CTX_new failed");
             }
             const bool ok = EVP_DigestInit_ex(context, EVP_sha256(), nullptr) == 1 &&
-                            EVP_DigestUpdate(context, data.data(), data.size()) == 1 &&
-                            EVP_DigestFinal_ex(context, digest.data(), &digest_length) == 1;
+                EVP_DigestUpdate(context, data.data(), data.size()) == 1 &&
+                EVP_DigestFinal_ex(context, digest.data(), &digest_length) == 1;
             EVP_MD_CTX_free(context);
             if (!ok) {
                 throw std::runtime_error("SHA-256 digest failed");
@@ -44,8 +44,8 @@ namespace tts {
 
     } // namespace
 
-    TtsCache::TtsCache(std::filesystem::path directory, const std::uint64_t max_bytes)
-        : directory_(std::move(directory)), max_bytes_(max_bytes) {
+    TtsCache::TtsCache(std::filesystem::path directory, const std::uint64_t max_bytes) :
+        directory_(std::move(directory)), max_bytes_(max_bytes) {
         std::error_code error;
         std::filesystem::create_directories(directory_, error);
         if (error) {
