@@ -21,7 +21,7 @@ namespace tts {
     ///
     /// - argv[0] 可以是 PATH 中的名字；
     /// - timeout 到期或 cancel 置位时杀掉整个进程组；
-    /// - 不捕获 stdout（后端应把音频写到文件）。
+    /// - stdout 重定向到 /dev/null；后端应把音频写到文件。
     [[nodiscard]] std::expected<ProcessOutcome, std::string>
     run_process(const std::vector<std::string>& argv,
                 std::string_view stdin_text,

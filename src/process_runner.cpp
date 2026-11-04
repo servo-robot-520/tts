@@ -101,6 +101,12 @@ namespace tts {
             ::setpgid(0, 0);
             ::dup2(stdin_fd, STDIN_FILENO);
             ::dup2(stderr_pipe[1], STDERR_FILENO);
+            // 后端把音频写入文件；CLI 的 stdout 进度输出不应污染节点日志。
+            const int devnull = ::open("/dev/null", O_WRONLY | O_CLOEXEC);
+            if (devnull >= 0) {
+                ::dup2(devnull, STDOUT_FILENO);
+                ::close(devnull);
+            }
 
             std::vector<char*> arguments;
             arguments.reserve(argv.size() + 1);
@@ -144,13 +150,16 @@ namespace tts {
                     const ssize_t count = ::read(stderr_fd, buffer, sizeof(buffer));
                     if (count > 0) {
                         capture(outcome.stderr_text, buffer, static_cast<std::size_t>(count));
-                    } else if (count == 0) {
+                    }
+                    else if (count == 0) {
                         stderr_eof = true;
-                    } else if (errno != EAGAIN && errno != EINTR) {
+                    }
+                    else if (errno != EAGAIN && errno != EINTR) {
                         stderr_eof = true;
                     }
                 }
-            } else {
+            }
+            else {
                 std::this_thread::sleep_for(std::chrono::milliseconds{5});
             }
 
@@ -170,7 +179,8 @@ namespace tts {
             const pid_t waited = ::waitpid(pid, &status, WNOHANG);
             if (waited == pid) {
                 exited = true;
-            } else if (waited < 0 && errno != EINTR) {
+            }
+            else if (waited < 0 && errno != EINTR) {
                 ::close(stderr_fd);
                 return std::unexpected(std::string{"waitpid failed: "} + std::strerror(errno));
             }
