@@ -114,8 +114,7 @@ namespace tts {
             throw std::invalid_argument("backend.timeout_ms must be greater than zero");
         }
 
-        audio_io_node_ = declare_string("audio_io.node",
-                                        std::string{audio_io_interface::kDefaultNodeFqn});
+        audio_io_node_ = audio_io_interface::qualify_node_fqn(audio_io_interface::kDefaultNodeFqn, node_->get_namespace());
         frame_id_ = declare_string("frame_id", "audio");
         default_group_ = declare_string("default.group", "tts");
         default_volume_ = node_->declare_parameter<double>("default.volume", 1.0);
@@ -178,8 +177,8 @@ namespace tts {
         service_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
         action_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
 
-        const auto clip_topic = audio_io_interface::topic_play(audio_io_node_);
-        const auto io_event_topic = audio_io_interface::topic_event(audio_io_node_);
+        const auto clip_topic = audio_io_interface::topic_play(audio_io_interface::kDefaultNodeFqn, node_->get_namespace());
+        const auto io_event_topic = audio_io_interface::topic_event(audio_io_interface::kDefaultNodeFqn, node_->get_namespace());
 
         rclcpp::SubscriptionOptions text_options;
         text_options.callback_group = text_group_;
